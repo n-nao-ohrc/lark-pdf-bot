@@ -1,142 +1,170 @@
-from flask import Flask, request, jsonify
-import requests
 import os
-import json
+import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# =========================
+# テナント設定
+# =========================
+TENANT_CONFIG = {
+    "irp": {
+        "APP_ID": os.getenv("IRP_LARK_APP_ID"),
+        "APP_SECRET": os.getenv("IRP_LARK_APP_SECRET"),
+        "APP_TOKEN": os.getenv("IRP_LARK_APP_TOKEN"),
+    },
+    "ohrc": {
+        "APP_ID": os.getenv("OHRC_LARK_APP_ID"),
+        "APP_SECRET": os.getenv("OHRC_LARK_APP_SECRET"),
+        "APP_TOKEN": os.getenv("OHRC_LARK_APP_TOKEN"),
+    }
+}
 
-def get_tenant_config(tenant_key: str):
-    tenant_key = tenant_key.upper()
 
-    config = {
-        "app_id": os.getenv(f"{tenant_key}_LARK_APP_ID"),
-        "app_secret": os.getenv(f"{tenant_key}_LARK_APP_SECRET"),
-        "app_token": os.getenv(f"{tenant_key}_LARK_APP_TOKEN"),
+# =========================
+# トークン取得
+# =========================
+def get_tenant_access_token(app_id, app_secret):
+    url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal/"
+    res = requests.post(url, json={
+        "app_id": app_id,
+        "app_secret": app_secret
+    }).json()
+
+    return res.get("tenant_access_token")
+
+
+# =========================
+# レコード取得
+# =========================
+def get_record(token, app_token, table_id, record_id):
+    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+
+    headers = {
+        "Authorization": f"Bearer {token}"
     }
 
-    print("CONFIG:", config)
-    return config
+    res = requests.get(url, headers=headers).json()
+    return res
 
 
-def get_tenant_token(app_id: str, app_secret: str):
-    url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
+# =========================
+# 添付ファイルダウンロード
+# =========================
+def download_file(token, file_token):
+    url = f"https://open.larksuite.com/open-apis/drive/v1/medias/{file_token}/download"
 
-    resp = requests.post(
-        url,
-        headers={"Content-Type": "application/json"},
-        json={
-            "app_id": app_id,
-            "app_secret": app_secret
-        },
-        timeout=30
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["tenant_access_token"]
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+
+    res = requests.get(url, headers=headers)
+
+    return res.content
 
 
-@app.route("/", methods=["GET"])
-def healthcheck():
-    return "IRP bot running", 200
+# =========================
+# 子レコード作成
+# =========================
+def create_children(token, app_token, table_id, parent_id, items):
+    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    records = []
+    for item in items:
+        records.append({
+            "fields": {
+                "テキスト": f"{item['name']} ×{item['qty']}",
+                "レコード種別": "子",
+                "親レコード": [parent_id],
+                "商品名": item["name"],
+                "数量": item["qty"],
+                "金額": item["price"]
+            }
+        })
+
+    payload = {"records": records}
+
+    print("PAYLOAD:", payload)
+
+    res = requests.post(url, headers=headers, json=payload)
+    print("LARK:", res.text)
+
+    return res.json()
 
 
+# =========================
+# 仮のPDF解析（後で置き換え）
+# =========================
+def parse_pdf(file_bytes):
+    # TODO: ここをGPTやOCRに置き換え
+    return [
+        {"name": "テスト試薬A", "qty": 1, "price": 1000},
+        {"name": "テスト試薬B", "qty": 2, "price": 2000}
+    ]
+
+
+# =========================
+# メイン
+# =========================
 @app.route("/", methods=["POST"])
 def webhook():
-    try:
-        raw_body = request.get_data(as_text=True)
-        print("RAW BODY:", raw_body)
-        print("HEADERS:", dict(request.headers))
+    body = request.json
+    print("RAW BODY:", body)
 
-        data = request.get_json(silent=True)
-        if data is None:
-            try:
-                data = json.loads(raw_body)
-            except Exception:
-                return jsonify({
-                    "status": "error",
-                    "message": "Invalid JSON received",
-                    "raw_body": raw_body
-                }), 400
+    tenant_key = body.get("tenant_key", "irp")
+    table_id = body.get("table_id")
+    record_id = body.get("record_id")
 
-        parent_record_id = data.get("record_id")
-        tenant_key = data.get("tenant_key")
-        table_id = data.get("table_id")
+    print("TENANT:", tenant_key)
+    print("TABLE:", table_id)
+    print("RECORD:", record_id)
 
-        if not parent_record_id:
-            return jsonify({"error": "record_id missing"}), 400
-        if not tenant_key:
-            return jsonify({"error": "tenant_key missing"}), 400
-        if not table_id:
-            return jsonify({"error": "table_id missing"}), 400
+    config = TENANT_CONFIG.get(tenant_key)
+    if not config:
+        return jsonify({"error": "invalid tenant"}), 400
 
-        print("TENANT:", tenant_key)
-        print("TABLE ID:", table_id)
-        print("PARENT RECORD:", parent_record_id)
+    token = get_tenant_access_token(config["APP_ID"], config["APP_SECRET"])
 
-        config = get_tenant_config(tenant_key)
+    # レコード取得
+    record = get_record(token, config["APP_TOKEN"], table_id, record_id)
 
-        if not all(config.values()):
-            return jsonify({
-                "error": "config missing",
-                "tenant": tenant_key,
-                "config": config
-            }), 500
+    fields = record["data"]["record"]["fields"]
 
-        token = get_tenant_token(config["app_id"], config["app_secret"])
+    print("FIELDS:", fields)
 
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{config['app_token']}/tables/{table_id}/records/batch_create"
+    # 添付ファイル取得
+    attachments = fields.get("添付ファイル", [])
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
+    if not attachments:
+        return jsonify({"error": "no attachment"}), 200
 
-        # 仮データ（後でPDF解析結果に置き換える）
-        items = [
-            {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
-            {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
-        ]
+    file_token = attachments[0]["file_token"]
 
-        records = []
-        for item in items:
-            records.append({
-                "fields": {
-                    "テキスト": f"{item['商品名']} ×{item['数量']}",
-                    "レコード種別": "子",
-                    "親レコード": [parent_record_id],
-                    "商品名": str(item["商品名"]),
-                    "数量": int(item["数量"]),
-                    "金額": int(item["金額"])
-                }
-            })
+    print("FILE TOKEN:", file_token)
 
-        payload = {"records": records}
-        print("PAYLOAD:", json.dumps(payload, ensure_ascii=False))
+    file_bytes = download_file(token, file_token)
 
-        resp = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
+    print("FILE SIZE:", len(file_bytes))
 
-        print("LARK STATUS:", resp.status_code)
-        print("LARK RESPONSE:", resp.text)
+    # PDF解析
+    items = parse_pdf(file_bytes)
 
-        return jsonify({
-            "status": "ok",
-            "tenant": tenant_key,
-            "table_id": table_id,
-            "lark_status": resp.status_code,
-            "lark_response": resp.json() if "application/json" in resp.headers.get("Content-Type", "") else resp.text
-        }), 200
+    # 子レコード作成
+    result = create_children(
+        token,
+        config["APP_TOKEN"],
+        table_id,
+        record_id,
+        items
+    )
 
-    except Exception as e:
-        print("ERROR:", str(e))
-        return jsonify({"error": str(e)}), 500
+    return jsonify(result)
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
