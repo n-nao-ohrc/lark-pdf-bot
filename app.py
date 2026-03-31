@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import requests
 import fitz  # PyMuPDF
 from flask import Flask, request, jsonify
@@ -84,24 +85,71 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 
 # =========================
+# 前処理
+# =========================
+def clean_extracted_text(text: str) -> str:
+    """
+    完全に削りすぎない範囲で、明らかなノイズを軽く減らす。
+    各社フォーマット差に対応したいため、強すぎるフィルタはしない。
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    cleaned = []
+
+    skip_keywords = [
+        "TEL", "ＦＡＸ", "FAX", "登録番号", "見積有効期限",
+        "納入期限", "納入場所", "支払条件"
+    ]
+
+    for line in lines:
+        if not line:
+            continue
+        if any(k in line for k in skip_keywords):
+            continue
+        cleaned.append(line)
+
+    return "\n".join(cleaned)
+
+
+# =========================
+# 税込計算
+# =========================
+def to_tax_included(amount: int, tax_category: str, tax_rate: float = 0.10) -> int:
+    """
+    tax_category:
+      - '税込'
+      - '税抜'
+      - '不明'
+    """
+    if tax_category == "税抜":
+        return int(round(amount * (1 + tax_rate)))
+    return int(amount)
+
+
+# =========================
 # GPTで明細抽出
 # =========================
 def parse_pdf_with_gpt(extracted_text: str) -> list[dict]:
     prompt = f"""
-あなたは見積書・納品書・請求書の明細抽出器です。
-以下のPDF抽出テキストから、明細行をJSON配列で抽出してください。
+あなたは日本の見積書・請求書・納品書から明細を抽出する専門家です。
+以下のPDF抽出テキストから、明細行だけをJSON配列で抽出してください。
 
 要件:
-- 出力はJSON配列のみ
-- 各要素は以下のキーを持つこと:
+- 出力はJSON配列のみ。コードブロックや説明文は付けない。
+- 各要素は必ず以下のキーを持つ:
   - 商品名: string
   - 数量: number
   - 金額: number
-- 単価しかなく金額が無い場合は、数量×単価で金額を推定してよい
-- 明細ではない行（小計、合計、税、住所、電話番号など）は除外
-- 数量や金額が不明な行は除外
-- 日本語のままでよい
-- コードブロックは付けない
+  - 税区分: string  # "税込" / "税抜" / "不明"
+- 小計、合計、内消費税、外消費税、送料単独行、住所、電話番号、会社情報、見積番号などは除外
+- 明細と判断できる行だけ抽出
+- 数量と金額が両方取れない行は除外
+- 金額は、その行の合計金額を優先
+- 単価しかなく金額がない場合は、数量×単価で金額を算出してよい
+- もし明細が税抜表示と判断できる場合は 税区分="税抜"
+- もし税込表示と判断できる場合は 税区分="税込"
+- 判定できない場合は 税区分="不明"
+- 日本の通常税率は10%としてよいが、ここでは税込変換はせず、元の明細金額をそのまま金額に入れる
+- 数量・金額は数値で出力する（カンマや円記号を除く）
 
 PDF抽出テキスト:
 {extracted_text}
@@ -121,11 +169,20 @@ PDF抽出テキスト:
     for item in items:
         name = str(item["商品名"]).strip()
         qty = int(float(item["数量"]))
-        price = int(float(item["金額"]))
+        amount = int(float(item["金額"]))
+        tax_category = str(item.get("税区分", "不明")).strip()
+
+        if tax_category not in ["税込", "税抜", "不明"]:
+            tax_category = "不明"
+
+        tax_included_amount = to_tax_included(amount, tax_category)
+
         normalized.append({
             "name": name,
             "qty": qty,
-            "price": price
+            "price_raw": amount,
+            "tax_category": tax_category,
+            "price_tax_included": tax_included_amount
         })
 
     return normalized
@@ -156,7 +213,8 @@ def create_children(
                 "親レコード": [parent_id],
                 "商品名": item["name"],
                 "数量": int(item["qty"]),
-                "金額": int(item["price"])
+                "金額": int(item["price_tax_included"]),
+                "税区分": item["tax_category"]
             }
         })
 
@@ -248,7 +306,10 @@ def webhook():
         if not extracted_text.strip():
             return jsonify({"error": "no text extracted from pdf"}), 500
 
-        items = parse_pdf_with_gpt(extracted_text)
+        cleaned_text = clean_extracted_text(extracted_text)
+        print("CLEANED TEXT PREVIEW:", cleaned_text[:2000])
+
+        items = parse_pdf_with_gpt(cleaned_text)
         print("PARSED ITEMS:", items)
 
         if not items:
@@ -268,6 +329,7 @@ def webhook():
             "table_id": table_id,
             "record_id": record_id,
             "items_count": len(items),
+            "items": items,
             "lark_result": result
         }), 200
 
