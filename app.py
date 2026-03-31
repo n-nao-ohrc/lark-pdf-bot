@@ -71,7 +71,9 @@ def webhook():
     for item in items:
         records.append({
             "fields": {
-                "テキスト": item["商品名"]
+                "テキスト": item["商品名"],
+                "レコード種別": "子",
+                "親ID": record_id
             }
         })
 
@@ -87,3 +89,7 @@ def webhook():
         "record_id": record_id,
         "lark_status": r.status_code
     }), 200
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
