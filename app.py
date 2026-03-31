@@ -62,6 +62,13 @@ def webhook():
 
         token = get_tenant_token()
 
+        # まずは固定データ
+        # 後でここをPDF解析結果に置き換える
+        items = [
+            {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
+            {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
+        ]
+
         url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_create"
 
         headers = {
@@ -69,16 +76,18 @@ def webhook():
             "Content-Type": "application/json"
         }
 
-        # 同一テーブル内で親子レコードを1件だけ試作
-        records = [
-            {
+        records = []
+        for item in items:
+            records.append({
                 "fields": {
-                    "テキスト": "親子テスト",
+                    "テキスト": str(item["商品名"]),
                     "レコード種別": "子",
-                    "親レコード": [parent_record_id]
+                    "親レコード": [parent_record_id],
+                    "商品名": str(item["商品名"]),
+                    "数量": int(item["数量"]),
+                    "金額": int(item["金額"])
                 }
-            }
-        ]
+            })
 
         payload = {"records": records}
         print("PAYLOAD:", json.dumps(payload, ensure_ascii=False))
