@@ -5,33 +5,68 @@ import json
 
 app = Flask(__name__)
 
-# ===== 環境変数 =====
-APP_ID = os.getenv("APP_ID")
-APP_SECRET = os.getenv("APP_SECRET")
-APP_TOKEN = os.getenv("APP_TOKEN")
-TABLE_ID = os.getenv("TABLE_ID")
+APP_ID = os.getenv("LARK_APP_ID")
+APP_SECRET = os.getenv("LARK_APP_SECRET")
+APP_TOKEN = os.getenv("LARK_APP_TOKEN")
+TABLE_ID = os.getenv("LARK_TABLE_ID")
 
-# ===== Lark トークン取得 =====
+
 def get_tenant_access_token():
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "app_id": APP_ID,
-        "app_secret": APP_SECRET
-    }
+    r = requests.post(
+        url,
+        headers={"Content-Type": "application/json"},
+        json={"app_id": APP_ID, "app_secret": APP_SECRET},
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    return data["tenant_access_token"]
 
-    r = requests.post(url, headers=headers, json=data)
-    res = r.json()
-    return res.get("tenant_access_token")
 
-# ===== Webhook =====
+def list_fields(token: str):
+    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/fields"
+    r = requests.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+    )
+    return r.status_code, r.text, r.json() if "application/json" in r.headers.get("Content-Type", "") else {}
+
+
+@app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
+
+@app.route("/fields", methods=["POST"])
+def fields_debug():
+    try:
+        token = get_tenant_access_token()
+        status, text, data = list_fields(token)
+        print("FIELDS STATUS:", status)
+        print("FIELDS RESPONSE:", text)
+        return jsonify({
+            "status": status,
+            "data": data
+        }), 200
+    except Exception as e:
+        print("FIELDS ERROR:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/", methods=["POST"])
 def webhook():
     try:
-        # ----- 受信データ -----
-        data = request.json
+        data = request.get_json(silent=True)
         print("RAW BODY:", data)
         print("HEADERS:", dict(request.headers))
+
+        if not data:
+            return jsonify({"error": "invalid json"}), 400
 
         record_id = data.get("record_id")
         print("RECORD_ID:", record_id)
@@ -39,52 +74,64 @@ def webhook():
         if not record_id:
             return jsonify({"error": "record_id missing"}), 400
 
-        # ----- 仮データ（PDF解析の代わり）-----
-        items = [
-            {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
-            {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
-        ]
+        token = get_tenant_access_token()
 
-        # ----- レコード作成（まずは最小構成）-----
-        records = []
-        for item in items:
-            records.append({
+        # まずフィールド一覧を取得して field_id を特定
+        fields_status, fields_text, fields_data = list_fields(token)
+        print("FIELDS STATUS:", fields_status)
+        print("FIELDS RESPONSE:", fields_text)
+
+        items = fields_data.get("data", {}).get("items", [])
+        text_field_id = None
+
+        for f in items:
+            # name / field_name のどちらで返る場合にも対応
+            fname = f.get("field_name") or f.get("name")
+            if fname == "テキスト":
+                text_field_id = f.get("field_id")
+                break
+
+        if not text_field_id:
+            return jsonify({
+                "error": "field 'テキスト' not found",
+                "fields": items
+            }), 500
+
+        # まずは1件だけ、field_id で作成して切り分け
+        records = [
+            {
                 "fields": {
-                    "テキスト": item["商品名"]
+                    text_field_id: "テスト試薬A"
                 }
-            })
+            }
+        ]
 
         payload = {"records": records}
         print("PAYLOAD:", json.dumps(payload, ensure_ascii=False))
 
-        # ----- Lark API 呼び出し -----
-        tenant_access_token = get_tenant_access_token()
-
         url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records/batch_create"
-
-        headers = {
-            "Authorization": f"Bearer {tenant_access_token}",
-            "Content-Type": "application/json"
-        }
-
-        r = requests.post(url, headers=headers, json=payload)
+        r = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
 
         print("LARK API STATUS:", r.status_code)
         print("LARK API RESPONSE:", r.text)
 
         return jsonify({
-            "status": "ok"
-        })
+            "status": "ok",
+            "lark_status": r.status_code,
+            "lark_response": r.json() if "application/json" in r.headers.get("Content-Type", "") else r.text
+        }), 200
 
     except Exception as e:
         print("ERROR:", str(e))
         return jsonify({"error": str(e)}), 500
-
-
-# ===== Health Check =====
-@app.route("/", methods=["GET"])
-def health():
-    return "OK", 200
 
 
 if __name__ == "__main__":
