@@ -15,6 +15,7 @@ def get_tenant_token():
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     resp = requests.post(
         url,
+        headers={"Content-Type": "application/json"},
         json={
             "app_id": LARK_APP_ID,
             "app_secret": LARK_APP_SECRET
@@ -22,18 +23,8 @@ def get_tenant_token():
         timeout=30
     )
     resp.raise_for_status()
-    return resp.json()["tenant_access_token"]
-
-
-def list_fields(token):
-    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/fields"
-    resp = requests.get(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30
-    )
-    resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    return data["tenant_access_token"]
 
 
 @app.route("/", methods=["GET"])
@@ -46,69 +37,55 @@ def webhook():
     try:
         raw_body = request.get_data(as_text=True)
         print("RAW BODY:", raw_body)
+        print("HEADERS:", dict(request.headers))
 
         data = request.get_json(silent=True)
         if data is None:
-            data = json.loads(raw_body)
+            try:
+                data = json.loads(raw_body)
+            except Exception:
+                return jsonify({
+                    "status": "error",
+                    "message": "Invalid JSON received",
+                    "raw_body": raw_body
+                }), 400
 
         parent_record_id = data.get("record_id")
         if not parent_record_id:
-            return jsonify({"error": "record_id missing"}), 400
+            return jsonify({
+                "status": "error",
+                "message": "record_id is missing",
+                "received": data
+            }), 400
 
         print("PARENT RECORD ID:", parent_record_id)
 
         token = get_tenant_token()
 
-        fields_data = list_fields(token)
-        print("FIELDS:", json.dumps(fields_data, ensure_ascii=False))
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_create"
 
-        items = fields_data.get("data", {}).get("items", [])
-
-        text_field_id = None
-        record_type_field_id = None
-        parent_link_field_id = None
-
-        for f in items:
-            field_name = f.get("field_name")
-            if field_name == "テキスト":
-                text_field_id = f.get("field_id")
-            elif field_name == "レコード種別":
-                record_type_field_id = f.get("field_id")
-            elif field_name == "親レコード":
-                parent_link_field_id = f.get("field_id")
-
-        print("text_field_id:", text_field_id)
-        print("record_type_field_id:", record_type_field_id)
-        print("parent_link_field_id:", parent_link_field_id)
-
-        if not text_field_id:
-            return jsonify({"error": "テキスト field not found"}), 500
-        if not record_type_field_id:
-            return jsonify({"error": "レコード種別 field not found"}), 500
-        if not parent_link_field_id:
-            return jsonify({"error": "親レコード field not found"}), 500
-
-        # 親レコードリンクの形式を試す
-       records = [
-    {
-        "fields": {
-            "テキスト": "親子テスト",
-            "レコード種別": "子",
-            "親レコード": [parent_record_id]
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
         }
-    }
-]
+
+        # 同一テーブル内で親子レコードを1件だけ試作
+        records = [
+            {
+                "fields": {
+                    "テキスト": "親子テスト",
+                    "レコード種別": "子",
+                    "親レコード": [parent_record_id]
+                }
+            }
+        ]
 
         payload = {"records": records}
         print("PAYLOAD:", json.dumps(payload, ensure_ascii=False))
 
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_create"
         resp = requests.post(
             url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            },
+            headers=headers,
             json=payload,
             timeout=30
         )
@@ -124,8 +101,12 @@ def webhook():
 
     except Exception as e:
         print("ERROR:", str(e))
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
