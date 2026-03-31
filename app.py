@@ -89,15 +89,15 @@ def webhook():
             return jsonify({"error": "親レコード field not found"}), 500
 
         # 親レコードリンクの形式を試す
-        records = [
-            {
-                "fields": {
-                    text_field_id: "親子テスト",
-                    record_type_field_id: "子",
-                    parent_link_field_id: [parent_record_id]
-                }
-            }
-        ]
+       records = [
+    {
+        "fields": {
+            "テキスト": "親子テスト",
+            "レコード種別": "子",
+            "親レコード": [parent_record_id]
+        }
+    }
+]
 
         payload = {"records": records}
         print("PAYLOAD:", json.dumps(payload, ensure_ascii=False))
