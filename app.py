@@ -5,82 +5,87 @@ import json
 
 app = Flask(__name__)
 
-LARK_APP_TOKEN = os.getenv("LARK_APP_TOKEN")
-LARK_TABLE_ID = os.getenv("LARK_TABLE_ID")
-LARK_APP_ID = os.getenv("LARK_APP_ID")
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")
+# ===== 環境変数 =====
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+APP_TOKEN = os.getenv("APP_TOKEN")
+TABLE_ID = os.getenv("TABLE_ID")
 
-
-def get_tenant_token():
+# ===== Lark トークン取得 =====
+def get_tenant_access_token():
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
-    resp = requests.post(url, json={
-        "app_id": LARK_APP_ID,
-        "app_secret": LARK_APP_SECRET
-    })
-    resp.raise_for_status()
-    data = resp.json()
-    return data["tenant_access_token"]
-
-
-@app.route("/", methods=["GET"])
-def healthcheck():
-    return "Lark PDF bot is running", 200
-
-
-@app.route("/", methods=["POST"])
-def webhook():
-    raw_body = request.get_data(as_text=True)
-    print("RAW BODY:", raw_body)
-    print("HEADERS:", dict(request.headers))
-
-    data = request.get_json(silent=True)
-
-    if data is None:
-        try:
-            data = json.loads(raw_body)
-        except Exception:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid JSON received",
-                "raw_body": raw_body
-            }), 400
-
-    record_id = data.get("record_id")
-    if not record_id:
-        return jsonify({
-            "status": "error",
-            "message": "record_id is missing",
-            "received": data
-        }), 400
-
-    token = get_tenant_token()
-
-    items = [
-        {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
-        {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
-    ]
-
-    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_create"
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "app_id": APP_ID,
+        "app_secret": APP_SECRET
     }
 
-records = []
-for item in items:
-    records.append({
-        "fields": {
-            "テキスト": item["商品名"]
+    r = requests.post(url, headers=headers, json=data)
+    res = r.json()
+    return res.get("tenant_access_token")
+
+# ===== Webhook =====
+@app.route("/", methods=["POST"])
+def webhook():
+    try:
+        # ----- 受信データ -----
+        data = request.json
+        print("RAW BODY:", data)
+        print("HEADERS:", dict(request.headers))
+
+        record_id = data.get("record_id")
+        print("RECORD_ID:", record_id)
+
+        if not record_id:
+            return jsonify({"error": "record_id missing"}), 400
+
+        # ----- 仮データ（PDF解析の代わり）-----
+        items = [
+            {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
+            {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
+        ]
+
+        # ----- レコード作成（まずは最小構成）-----
+        records = []
+        for item in items:
+            records.append({
+                "fields": {
+                    "テキスト": item["商品名"]
+                }
+            })
+
+        payload = {"records": records}
+        print("PAYLOAD:", json.dumps(payload, ensure_ascii=False))
+
+        # ----- Lark API 呼び出し -----
+        tenant_access_token = get_tenant_access_token()
+
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records/batch_create"
+
+        headers = {
+            "Authorization": f"Bearer {tenant_access_token}",
+            "Content-Type": "application/json"
         }
-    })
 
-    r = requests.post(url, headers=headers, json={"records": records})
-    print("LARK API STATUS:", r.status_code)
-    print("LARK API RESPONSE:", r.text)
+        r = requests.post(url, headers=headers, json=payload)
 
-    return jsonify({
-        "status": "ok",
-        "record_id": record_id,
-        "lark_status": r.status_code
-    }), 200
+        print("LARK API STATUS:", r.status_code)
+        print("LARK API RESPONSE:", r.text)
+
+        return jsonify({
+            "status": "ok"
+        })
+
+    except Exception as e:
+        print("ERROR:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+
+# ===== Health Check =====
+@app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
