@@ -67,17 +67,13 @@ def webhook():
         "Content-Type": "application/json"
     }
 
-    records = []
-    for item in items:
-        records.append({
-            "fields": {
-                "レコード種別": "子",
-                "親ID": record_id,
-                "商品名": item["商品名"],
-                "数量": item["数量"],
-                "金額": item["金額"]
-            }
-        })
+records = []
+for item in items:
+    records.append({
+        "fields": {
+            "テキスト": item["商品名"]
+        }
+    })
 
     r = requests.post(url, headers=headers, json={"records": records})
     print("LARK API STATUS:", r.status_code)
