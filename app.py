@@ -9,16 +9,19 @@ app = Flask(__name__)
 def get_tenant_config(tenant_key: str):
     tenant_key = tenant_key.upper()
 
-    return {
+    config = {
         "app_id": os.getenv(f"{tenant_key}_LARK_APP_ID"),
         "app_secret": os.getenv(f"{tenant_key}_LARK_APP_SECRET"),
         "app_token": os.getenv(f"{tenant_key}_LARK_APP_TOKEN"),
-        "table_id": os.getenv(f"{tenant_key}_LARK_TABLE_ID"),
     }
+
+    print("CONFIG:", config)
+    return config
 
 
 def get_tenant_token(app_id: str, app_secret: str):
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
+
     resp = requests.post(
         url,
         headers={"Content-Type": "application/json"},
@@ -35,7 +38,7 @@ def get_tenant_token(app_id: str, app_secret: str):
 
 @app.route("/", methods=["GET"])
 def healthcheck():
-    return "Lark PDF bot is running", 200
+    return "IRP bot running", 200
 
 
 @app.route("/", methods=["POST"])
@@ -58,40 +61,42 @@ def webhook():
 
         parent_record_id = data.get("record_id")
         tenant_key = data.get("tenant_key")
+        table_id = data.get("table_id")
 
         if not parent_record_id:
-            return jsonify({"status": "error", "message": "record_id is missing"}), 400
+            return jsonify({"error": "record_id missing"}), 400
         if not tenant_key:
-            return jsonify({"status": "error", "message": "tenant_key is missing"}), 400
+            return jsonify({"error": "tenant_key missing"}), 400
+        if not table_id:
+            return jsonify({"error": "table_id missing"}), 400
 
-        print("PARENT RECORD ID:", parent_record_id)
-        print("TENANT KEY:", tenant_key)
+        print("TENANT:", tenant_key)
+        print("TABLE ID:", table_id)
+        print("PARENT RECORD:", parent_record_id)
 
         config = get_tenant_config(tenant_key)
 
         if not all(config.values()):
             return jsonify({
-                "status": "error",
-                "message": "Tenant config is incomplete",
-                "tenant_key": tenant_key,
+                "error": "config missing",
+                "tenant": tenant_key,
                 "config": config
             }), 500
 
         token = get_tenant_token(config["app_id"], config["app_secret"])
 
-        # まずは固定データ
-        # 後でここをPDF抽出結果に置き換える
-        items = [
-            {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
-            {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
-        ]
-
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{config['app_token']}/tables/{config['table_id']}/records/batch_create"
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{config['app_token']}/tables/{table_id}/records/batch_create"
 
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
+
+        # 仮データ（後でPDF解析結果に置き換える）
+        items = [
+            {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
+            {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
+        ]
 
         records = []
         for item in items:
@@ -116,22 +121,20 @@ def webhook():
             timeout=30
         )
 
-        print("LARK API STATUS:", resp.status_code)
-        print("LARK API RESPONSE:", resp.text)
+        print("LARK STATUS:", resp.status_code)
+        print("LARK RESPONSE:", resp.text)
 
         return jsonify({
             "status": "ok",
-            "tenant_key": tenant_key,
+            "tenant": tenant_key,
+            "table_id": table_id,
             "lark_status": resp.status_code,
             "lark_response": resp.json() if "application/json" in resp.headers.get("Content-Type", "") else resp.text
         }), 200
 
     except Exception as e:
         print("ERROR:", str(e))
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
