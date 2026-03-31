@@ -5,7 +5,6 @@ import json
 
 app = Flask(__name__)
 
-# Render の Environment Variables と一致させる
 LARK_APP_TOKEN = os.getenv("LARK_APP_TOKEN")
 LARK_TABLE_ID = os.getenv("LARK_TABLE_ID")
 LARK_APP_ID = os.getenv("LARK_APP_ID")
@@ -23,8 +22,18 @@ def get_tenant_token():
         timeout=30
     )
     resp.raise_for_status()
-    data = resp.json()
-    return data["tenant_access_token"]
+    return resp.json()["tenant_access_token"]
+
+
+def list_fields(token):
+    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/fields"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 @app.route("/", methods=["GET"])
@@ -37,79 +46,85 @@ def webhook():
     try:
         raw_body = request.get_data(as_text=True)
         print("RAW BODY:", raw_body)
-        print("HEADERS:", dict(request.headers))
 
         data = request.get_json(silent=True)
-
         if data is None:
-            try:
-                data = json.loads(raw_body)
-            except Exception:
-                return jsonify({
-                    "status": "error",
-                    "message": "Invalid JSON received",
-                    "raw_body": raw_body
-                }), 400
+            data = json.loads(raw_body)
 
-        record_id = data.get("record_id")
-        if not record_id:
-            return jsonify({
-                "status": "error",
-                "message": "record_id is missing",
-                "received": data
-            }), 400
+        parent_record_id = data.get("record_id")
+        if not parent_record_id:
+            return jsonify({"error": "record_id missing"}), 400
 
-        print("RECORD_ID:", record_id)
+        print("PARENT RECORD ID:", parent_record_id)
 
         token = get_tenant_token()
 
-        # まずは固定データで動作確認
-        # 後でここをPDF抽出結果に置き換える
-        items = [
-            {"商品名": "テスト試薬A", "数量": 1, "金額": 1000},
-            {"商品名": "テスト試薬B", "数量": 2, "金額": 2000}
-        ]
+        fields_data = list_fields(token)
+        print("FIELDS:", json.dumps(fields_data, ensure_ascii=False))
 
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_create"
+        items = fields_data.get("data", {}).get("items", [])
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
+        text_field_id = None
+        record_type_field_id = None
+        parent_link_field_id = None
 
-        records = []
-        for item in items:
-            records.append({
+        for f in items:
+            field_name = f.get("field_name")
+            if field_name == "テキスト":
+                text_field_id = f.get("field_id")
+            elif field_name == "レコード種別":
+                record_type_field_id = f.get("field_id")
+            elif field_name == "親レコード":
+                parent_link_field_id = f.get("field_id")
+
+        print("text_field_id:", text_field_id)
+        print("record_type_field_id:", record_type_field_id)
+        print("parent_link_field_id:", parent_link_field_id)
+
+        if not text_field_id:
+            return jsonify({"error": "テキスト field not found"}), 500
+        if not record_type_field_id:
+            return jsonify({"error": "レコード種別 field not found"}), 500
+        if not parent_link_field_id:
+            return jsonify({"error": "親レコード field not found"}), 500
+
+        # 親レコードリンクの形式を試す
+        records = [
+            {
                 "fields": {
-                    "テキスト": str(item["商品名"]),
-                    "レコード種別": "子",
-                    "親ID": str(record_id),
-                    "商品名": str(item["商品名"]),
-                    "数量": int(item["数量"]),
-                    "金額": int(item["金額"])
+                    text_field_id: "親子テスト",
+                    record_type_field_id: "子",
+                    parent_link_field_id: [parent_record_id]
                 }
-            })
+            }
+        ]
 
         payload = {"records": records}
         print("PAYLOAD:", json.dumps(payload, ensure_ascii=False))
 
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
-        print("LARK API STATUS:", r.status_code)
-        print("LARK API RESPONSE:", r.text)
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_create"
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=30
+        )
+
+        print("LARK API STATUS:", resp.status_code)
+        print("LARK API RESPONSE:", resp.text)
 
         return jsonify({
             "status": "ok",
-            "record_id": record_id,
-            "lark_status": r.status_code,
-            "lark_response": r.json() if "application/json" in r.headers.get("Content-Type", "") else r.text
+            "lark_status": resp.status_code,
+            "lark_response": resp.json() if "application/json" in resp.headers.get("Content-Type", "") else resp.text
         }), 200
 
     except Exception as e:
         print("ERROR:", str(e))
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
